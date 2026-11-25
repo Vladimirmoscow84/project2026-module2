@@ -1,0 +1,40 @@
+# Собранный Compose-файл seed; fragments из старого kit здесь намеренно не требуются.
+services:
+  db:
+    image: postgres:16.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:size=32m,exec,nosuid,nodev
+      - /run/postgresql:size=16m,exec,nosuid,nodev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      start_period: 10s
+      retries: 20
+  backend:
+    build: ./backend
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      SCORE_SOURCE: ${SCORE_SOURCE:-random-v1}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:

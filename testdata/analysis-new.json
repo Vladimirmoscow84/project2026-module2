@@ -1,0 +1,9 @@
+{
+  "analysis_id": "2",
+  "created_at": "2026-01-01T00:00:00Z",
+  "vacancy_text": "Разработка на Go. Уметь разбирать причины отказа HTTP-запросов.",
+  "score_source": "random-v1",
+  "result": {
+    "score": 100
+  }
+}

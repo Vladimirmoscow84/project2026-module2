@@ -1,0 +1,16 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "EDU public / student workspace",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {},
+  "components": {
+    "schemas": {}
+  }
+}

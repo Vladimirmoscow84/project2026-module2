@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+*.log
+*.dump
+postgres-data/
+node_modules/
+dist/
+__pycache__/
+.course-reports/
+cookies.txt
