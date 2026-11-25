@@ -16,6 +16,7 @@ func routes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /login", app.loginHandler)
 	mux.HandleFunc("GET /me", app.meHandler)
 	mux.HandleFunc("POST /register", app.registerHandler)
+	mux.HandleFunc("POST /refresh", app.refreshHandler)
 	//
 	//
 	//
@@ -71,15 +72,23 @@ func (a *App) loginHandler(w http.ResponseWriter, r *http.Request) {
 		a.Sessions.Delete(previos.Value)
 	}
 
-	//create a new session
-	token, err := a.Sessions.Create(userID, 1*time.Hour)
+	// create access-token (lives 15 minutes).
+	accessToken, err := a.Sessions.Create(userID, 15*time.Minute)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "session_failed", "Failed creation session")
+		writeError(w, http.StatusInternalServerError, "session_failed", "Access token creation failed")
 		return
 	}
 
-	//install cookie with new token
-	http.SetCookie(w, sessionCookie(token, false))
+	// create refresh-token (lives 30 days).
+	refreshToken, err := a.RefreshSessions.Create(userID, 30*24*time.Hour)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_failed", "Refresh token creation failed")
+		return
+	}
+
+	// return two tikiens in cookie.
+	http.SetCookie(w, sessionCookie(accessToken, false))
+	http.SetCookie(w, refreshCookie(refreshToken, false))
 
 	//response to client 200 ok with simple JSON file
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -181,6 +190,46 @@ func (a *App) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//all right return 291
+	//all right return 201
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "created"})
+}
+
+// refeshHandler -POST /refresh
+// change refresh-token to new twins (access + refresh)
+func (a *App) refreshHandler(w http.ResponseWriter, r *http.Request) {
+	//get refresh-token from cookie
+	cookie, err := r.Cookie("edu_refresh")
+	if err != nil || cookie.Value == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Valid refresh token required")
+		return
+	}
+
+	//check refresh-token in storage
+	userID, ok := a.RefreshSessions.Lookup(cookie.Value)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Valid refresh token required")
+		return
+
+	}
+
+	//delete old refresh-token (rotation)
+	a.RefreshSessions.Delete(cookie.Value)
+
+	//create new twins token
+	accessToken, err := a.Sessions.Create(userID, 15*time.Minute)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_failed", "Access token creation failed")
+		return
+	}
+	refreshToken, err := a.RefreshSessions.Create(userID, 30*24*time.Hour)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "session_failed", "Refresh token creation failed")
+		return
+	}
+
+	// return two tokens to cookie
+	http.SetCookie(w, sessionCookie(accessToken, false))
+	http.SetCookie(w, refreshCookie(refreshToken, false))
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "refreshed"})
 }

@@ -17,8 +17,9 @@ import (
 )
 
 type App struct {
-	DB       *sql.DB
-	Sessions *Sessions
+	DB              *sql.DB
+	Sessions        *Sessions
+	RefreshSessions *RefreshSessions
 }
 
 func CheckPassword(hash string, value string) bool {
@@ -89,7 +90,7 @@ func main() {
 		fmt.Println("Training users prepared; no values printed.")
 		return
 	}
-	app := &App{DB: db, Sessions: NewSessions()}
+	app := &App{DB: db, Sessions: NewSessions(), RefreshSessions: NewRefreshSessions()}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
