@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -14,10 +15,10 @@ import (
 // routes - binds the path to the handlers
 func routes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /login", app.loginHandler)
-	mux.HandleFunc("GET /me", app.meHandler)
+	mux.Handle("GET /me", app.authMiddleware(http.HandlerFunc(app.meHandler)))
 	mux.HandleFunc("POST /register", app.registerHandler)
 	mux.HandleFunc("POST /refresh", app.refreshHandler)
-	//
+	mux.Handle("POST /resumes", app.authMiddleware(http.HandlerFunc(app.resumeUploadHandler)))
 	//
 	//
 	//
@@ -100,10 +101,11 @@ func (a *App) loginHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+//!!!------old handler before middleware------
 // meHandler - handler for GET /me
 // return info about the current user (email)
 // bot only if request has valid token in cookies
-func (a *App) meHandler(w http.ResponseWriter, r *http.Request) {
+/*func (a *App) meHandler(w http.ResponseWriter, r *http.Request) {
 
 	//try get cookies with any name axample: "edu_session""
 	cookie, err := r.Cookie("edu_session")
@@ -131,6 +133,29 @@ func (a *App) meHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	//all good return 200 ok and JSON. with email
+	writeJSON(w, http.StatusOK, map[string]string{"email": email})
+}
+*/
+
+// New meHandler with middleware
+func (a *App) meHandler(w http.ResponseWriter, r *http.Request) {
+	//get userId from context
+	userID := userIDFromContext(r.Context())
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Valid session required")
+		return
+	}
+
+	//get email from DB
+	var email string
+	row := a.DB.QueryRowContext(r.Context(),
+		`SELECT email FROM users WHERE user_id=$1`, userID)
+	err := row.Scan(&email)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "me_failed", "Could not fetch user")
+		return
+	}
+	//return email
 	writeJSON(w, http.StatusOK, map[string]string{"email": email})
 }
 
@@ -238,4 +263,101 @@ func (a *App) refreshHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, refreshCookie(refreshToken, false))
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "refreshed"})
+}
+
+// resumeUploadhandler - POST /resumes
+// accepts the file (multipart/form-data), check size and type
+// extract text and save it in DB
+func (a *App) resumeUploadHandler(w http.ResponseWriter, r *http.Request) {
+	// limit size body before reading
+	// http.MaxBytesReader return error if body>limit
+	const maxUploadSize = 5 << 20 // 5 MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+
+	// parse multipart form
+	// r.ParseMultipartForm(maxMemory) — read form and save file to disc (before maxMemory).
+	// if filesize > maxMemory — save to temporary file
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "File is too large (max 5 MB)")
+		return
+	}
+
+	//  Get file from form (after resume)
+	file, header, err := r.FormFile("resume")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing file field 'resume'")
+		return
+	}
+	defer file.Close()
+
+	// check file size from header
+	if header.Size > maxUploadSize {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large", "File is too large (max 5 MB)")
+		return
+	}
+
+	// get the type
+	// http.DetectContentType — standart go func to determines MIME-type
+	buffer := make([]byte, 512)
+	n, err := file.Read(buffer)
+	if err != nil && err != io.EOF {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Could not read file")
+		return
+	}
+	contentType := http.DetectContentType(buffer[:n])
+
+	// allow onli text-files
+	allowedTypes := []string{"text/plain", "application/pdf", "application/msword"}
+	isAllowed := false
+	for _, t := range allowedTypes {
+		if strings.HasPrefix(contentType, t) {
+			isAllowed = true
+			break
+		}
+	}
+	if !isAllowed {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "Only text files are supported")
+		return
+	}
+
+	//  Extract text
+	// return to begining of the file
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Could not read file")
+		return
+	}
+	content, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read_failed", "Could not read file")
+		return
+	}
+
+	text := strings.TrimSpace(string(content))
+	if len(text) == 0 {
+		writeError(w, http.StatusUnprocessableEntity, "empty_file", "File does not contain text")
+		return
+	}
+
+	// Get userID from context (middleware worked)
+	userID := userIDFromContext(r.Context())
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Valid session required")
+		return
+	}
+
+	// Save resume in DB with status "parsed"
+	var resumeID int64
+	err = a.DB.QueryRowContext(r.Context(),
+		`INSERT INTO resumes (user_id, text_content, status) VALUES ($1, $2, 'parsed') RETURNING resume_id`,
+		userID, text).Scan(&resumeID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "save_failed", "Could not save resume")
+		return
+	}
+
+	// return 201 Created сwith ID
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"resume_id": resumeID,
+		"status":    "parsed",
+	})
 }
