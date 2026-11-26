@@ -47,6 +47,12 @@ func (a *App) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	//check rate limit: no more one attempt on 5 seconds
+	if !a.Limiter.Allow(input.Email) {
+		writeError(w, http.StatusTooManyRequests, "too_many_requests", "Too many login attempts, try again later")
+		return
+	}
+
 	var userID, hash string
 
 	//do request to DB and write to userID and hash

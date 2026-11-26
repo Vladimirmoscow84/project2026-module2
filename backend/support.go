@@ -126,3 +126,32 @@ func refreshCookie(value string, clear bool) *http.Cookie {
 	return &http.Cookie{Name: "edu_refresh", Value: value, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, Secure: false, MaxAge: age}
 }
+
+// Ratelimiter - simple login attempt rate limiter
+// save last time attempt for each email
+type RateLimiter struct {
+	mu    sync.Mutex
+	last  map[string]time.Time
+	limit time.Duration
+}
+
+func NewRateLimiter(limit time.Duration) *RateLimiter {
+	return &RateLimiter{
+		last:  make(map[string]time.Time),
+		limit: limit,
+	}
+}
+
+// allow - checks whether an attempt can be made
+func (r *RateLimiter) Allow(email string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	last, ok := r.last[email]
+	if ok && now.Sub(last) < r.limit {
+		return false
+	}
+	r.last[email] = now
+
+	return true
+}
