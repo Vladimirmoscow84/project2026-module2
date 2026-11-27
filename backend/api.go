@@ -19,7 +19,7 @@ func routes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /register", app.registerHandler)
 	mux.HandleFunc("POST /refresh", app.refreshHandler)
 	mux.Handle("POST /resumes", app.authMiddleware(http.HandlerFunc(app.resumeUploadHandler)))
-	//
+	mux.Handle("GET /resumes/{id}", app.authMiddleware(http.HandlerFunc(app.getResumeHandler)))
 	//
 	//
 	//
@@ -360,4 +360,51 @@ func (a *App) resumeUploadHandler(w http.ResponseWriter, r *http.Request) {
 		"resume_id": resumeID,
 		"status":    "parsed",
 	})
+}
+
+// getResumeHandler - GET /resumes{id}
+// returns the summary if it belongs to the current user
+func (a *App) getResumeHandler(w http.ResponseWriter, r *http.Request) {
+
+	//get ID from path
+	idSTr := r.PathValue("id")
+	if idSTr == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Resume ID is required")
+		return
+	}
+
+	//get userID from context(middleware check token successfully)
+	userID := userIDFromContext(r.Context())
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Valid session required")
+		return
+	}
+
+	//looking a resume in DB
+	var ownerID, text, status string
+
+	row := a.DB.QueryRowContext(r.Context(),
+		`SELECT user_id::text, text_content, status FROM resumes WHERE resume_id=$1`, idSTr)
+	err := row.Scan(&ownerID, &text, &status)
+
+	// if the resume  is not found - 404
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not_found", "Resume not found")
+		return
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get_failed", "Could not fetch resume")
+		return
+	}
+
+	//checking that rental summary belongs to the current user
+	//if is not - 403
+	if ownerID != userID {
+		writeError(w, http.StatusForbidden, "forbidden", "This document is not available to you")
+		return
+	}
+
+	//all right - return text
+	writeJSON(w, http.StatusOK, map[string]any{"resume_id": idSTr, "text": text, "status": status})
 }
