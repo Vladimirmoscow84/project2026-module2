@@ -20,8 +20,8 @@ func routes(mux *http.ServeMux, app *App) {
 	mux.HandleFunc("POST /refresh", app.refreshHandler)
 	mux.Handle("POST /resumes", app.authMiddleware(http.HandlerFunc(app.resumeUploadHandler)))
 	mux.Handle("GET /resumes/{id}", app.authMiddleware(http.HandlerFunc(app.getResumeHandler)))
-	//
-	//
+	mux.Handle("POST /analyses", app.authMiddleware(http.HandlerFunc(app.createAnalysisHandler)))
+	mux.Handle("GET /analyses/{id}", app.authMiddleware(http.HandlerFunc(app.getAnalysisHandler)))
 	//
 
 }
@@ -407,4 +407,132 @@ func (a *App) getResumeHandler(w http.ResponseWriter, r *http.Request) {
 
 	//all right - return text
 	writeJSON(w, http.StatusOK, map[string]any{"resume_id": idSTr, "text": text, "status": status})
+}
+
+// createAnalysisHandler - POST /analyses
+// runs the analysis
+func (a *App) createAnalysisHandler(w http.ResponseWriter, r *http.Request) {
+	//read JSON
+	var input struct {
+		ResumeID    int64  `json:"resume_id"`
+		VacancyText string `json:"vacancy_text"`
+	}
+	err := json.NewDecoder(r.Body).Decode(&input)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Invalid JSON body")
+		return
+	}
+
+	if input.ResumeID == 0 || strings.TrimSpace(input.VacancyText) == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "resume_id and vacancy_text are required")
+		return
+	}
+
+	//get userID from context (middleware)
+	userID := userIDFromContext(r.Context())
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Valid session required")
+		return
+	}
+
+	//checking that the resume belong to. the current user
+	var ownerID, resumeText string
+	row := a.DB.QueryRowContext(r.Context(),
+		`SELECT user_id::text, text_content FROM resumes WHERE resume_id = $1`, input.ResumeID)
+	err = row.Scan(&ownerID, &resumeText)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not_found", "Resume not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get_failed", "Could not fetch resume")
+		return
+	}
+	if ownerID != userID {
+		writeError(w, http.StatusForbidden, "forbidden", "This document is not available to you")
+		return
+	}
+
+	// check hrere is analysis with such content (resume_id + vacancy_text).
+	// hash the content for fast searching
+	var existingID int64
+	row = a.DB.QueryRowContext(r.Context(),
+		`SELECT analysis_id FROM analyses WHERE user_id = $1 AND resume_text = $2 AND vacancy_text = $3 LIMIT 1`,
+		userID, resumeText, input.VacancyText)
+	err = row.Scan(&existingID)
+	if err == nil {
+
+		//if found correct
+		writeJSON(w, http.StatusOK, map[string]any{"analysis_id": existingID, "status": "existing"})
+		return
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "get_failed", "Could not check existing analysis")
+		return
+	}
+
+	// create a new task
+	// status='done' and result={"score": random}
+	// in a real: status='queued', and handler switching 'running' и 'done'
+	var analysisID int64
+	err = a.DB.QueryRowContext(r.Context(),
+		`INSERT INTO analyses (user_id, resume_text, vacancy_text, result, score_source, status)
+		 VALUES ($1, $2, $3, jsonb_build_object('score', floor(random() * 101)::int), 'random-v1', 'done')
+		 RETURNING analysis_id`,
+		userID, resumeText, input.VacancyText).Scan(&analysisID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create_failed", "Could not create analysis")
+		return
+	}
+
+	// return 202 Accepted with id
+	writeJSON(w, http.StatusAccepted, map[string]any{"analysis_id": analysisID, "status": "queued"})
+
+}
+
+// getAnalysisHandler - GET /analises/{id}
+// returned staus and esult of analysis
+func (a *App) getAnalysisHandler(w http.ResponseWriter, r *http.Request) {
+	// get id from the path
+	idStr := r.PathValue("id")
+	if idStr == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Analysis ID is required")
+		return
+	}
+
+	//get userID from context
+	userID := userIDFromContext(r.Context())
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Valid session required")
+		return
+	}
+
+	//found analysis in DB
+	var ownerID, status, result string
+	row := a.DB.QueryRowContext(r.Context(),
+		`SELECT user_id::text, status, result::text FROM analyses WHERE analysis_id = $1`, idStr)
+	err := row.Scan(&ownerID, &status, &result)
+
+	// If not found - 404
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not_found", "Analysis not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "get_failed", "Could not fetch analysis")
+		return
+	}
+
+	// check for owners (403 for other)
+	if ownerID != userID {
+		writeError(w, http.StatusForbidden, "forbidden", "This analysis is not available to you")
+		return
+	}
+
+	// return status and result
+	writeJSON(w, http.StatusOK, map[string]any{
+		"analysis_id": idStr,
+		"status":      status,
+		"result":      json.RawMessage(result),
+	})
 }
